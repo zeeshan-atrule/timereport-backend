@@ -8,7 +8,7 @@ import dotenv from 'dotenv'
 import configRoutes from './routes/config.js'
 import syncRoutes from './routes/sync.js'
 import targetConfigRoutes from './routes/targetConfig.js'
-// import { startMonthlyReportCron } from './cronMonthlyReport.js'
+import monthlyReportHandler from './routes/monthly-report.js' // Import the monthly report handler
 
 dotenv.config()
 
@@ -33,6 +33,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/config', configRoutes)
 app.use('/api/sync', syncRoutes)
 app.use('/api/target-config', targetConfigRoutes)
+app.get('/api/cron/monthly-report', monthlyReportHandler) // Register the cron job route
 
 app.use((err, _req, res, _next) => {
   console.error(err)
@@ -46,8 +47,6 @@ const start = async () => {
   }
   await mongoose.connect(process.env.MONGO_URI)
   console.log('Connected to MongoDB')
-  // Start the monthly report cron job
-  // startMonthlyReportCron()
   app.listen(PORT, () => console.log(`Backend listening on ${PORT}`))
 }
 
