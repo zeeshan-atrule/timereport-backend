@@ -17,6 +17,13 @@ export const buildFlatEmployeeClientMonthAggregation = (tasks) => {
   });
   return Array.from(map.values());
 };
+
+// Legacy aggregation used by /api/sync – now internally delegates to the
+// same employee/client/month aggregation as the cron job so that the shape
+// (including totalWorkedHours and totalClientHours) is consistent.
+export const aggregateTasksByEmployeeMonthClient = (tasks) => {
+  return aggregateTasksByEmployeeClientMonth(tasks);
+};
 import axios from 'axios'
 
 const mondayClient = axios.create({
@@ -479,6 +486,43 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
   const tempNameToId = new Map()
   const tempIdToName = new Map()
 
+  // Pre-pass: build a global map of employee name <-> ID across ALL items,
+  // so that time tracking history for an employee is not lost just because
+  // their "people" column item appears later in the list. This mirrors the
+  // frontend TaskTimeDashboard logic.
+  uniqueItems.forEach((item) => {
+    const columnsValues = item.column_values || []
+    const employeeCol = columnsValues.find((col) => col.id === employee)
+    if (!employeeCol) return
+
+    const employeeText = employeeCol.text || ''
+    const employeeNames = splitNames(employeeText)
+
+    if (Array.isArray(employeeCol.persons_and_teams)) {
+      const persons = employeeCol.persons_and_teams.filter((p) => p.kind === 'person' && p.id)
+      persons.forEach((person, index) => {
+        const name = employeeNames[index] || ''
+        if (name) {
+          tempNameToId.set(name, person.id)
+          tempIdToName.set(String(person.id), name)
+        }
+      })
+      if (employeeNames.length > persons.length) {
+        employeeNames.slice(persons.length).forEach((name) => {
+          if (name && !tempNameToId.has(name)) {
+            tempNameToId.set(name, '')
+          }
+        })
+      }
+    } else {
+      employeeNames.forEach((name) => {
+        if (name && !tempNameToId.has(name)) {
+          tempNameToId.set(name, '')
+        }
+      })
+    }
+  })
+
   uniqueItems.forEach((item) => {
     console.log(`[DEBUG] Processing item: ${item.id} - ${item.name}`)
     
@@ -536,13 +580,16 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
         }
         processedEntries.add(entryKey)
 
-        const startIso = entry.started_at
-        const endIso = entry.ended_at
+        // Be tolerant of missing started_at / ended_at, same as frontend logic:
+        // - Use whichever timestamp is present as both start and end as a fallback,
+        //   so that entries with only one side set are still counted.
+        let startIso = entry.started_at || entry.ended_at
+        let endIso = entry.ended_at || entry.started_at
         const userId = entry.started_user_id || entry.ended_user_id
 
         console.log(`[DEBUG] Entry ${index}: start=${startIso}, end=${endIso}, user=${userId}`)
 
-        // Skip entries without both start and end times
+        // Skip entries without timestamps or user
         if (!startIso || !endIso || !userId) {
           console.log(`[DEBUG] Entry ${index} skipped: missing start/end/user`)
           return
@@ -553,8 +600,8 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
           const endTime = new Date(endIso).getTime()
 
           // Validate time range
-          if (endTime <= startTime) {
-            console.log(`[DEBUG] Entry ${index} skipped: end time <= start time`)
+          if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
+            console.log(`[DEBUG] Entry ${index} skipped: invalid time range`)
             return
           }
 

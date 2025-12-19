@@ -119,20 +119,20 @@ const runMonthlyReportJob = async (triggerSource = 'manual') => {
   }
 }
 
-export const startMonthlyReportCron = () => {
-  // Existing high-frequency cron (for testing) – currently every minute
-  cron.schedule('*/1 * * * *', async () => {
-    await runMonthlyReportJob('cron-every-minute')
-  })
+// export const startMonthlyReportCron = () => {
+//   // Existing high-frequency cron (for testing) – currently every minute
+//   cron.schedule('*/1 * * * *', async () => {
+//     await runMonthlyReportJob('cron-every-minute')
+//   })
 
-  // New production-like cron: run every day at 00:00 server time,
-  // but only execute logic if it's the last day of the month
-  cron.schedule('0 0 * * *', async () => {
-    if (!isLastDayOfMonth()) {
-      console.log('[CRON] Midnight daily check – not last day of month, skipping job')
-      return
-    }
+//   // New production-like cron: run every day at 00:00 server time,
+//   // but only execute logic if it's the last day of the month
+//   cron.schedule('0 0 * * *', async () => {
+//     if (!isLastDayOfMonth()) {
+//       console.log('[CRON] Midnight daily check – not last day of month, skipping job')
+//       return
+//     }
 
-    await runMonthlyReportJob('cron-last-day-midnight')
-  })
-}
+//     await runMonthlyReportJob('cron-last-day-midnight')
+//   })
+// }
