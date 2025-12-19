@@ -44,7 +44,7 @@ const isLastDayOfMonth = () => {
 let isCronJobRunning = false;
 
 // Core job logic shared by both schedules
-const runMonthlyReportJob = async (triggerSource = 'manual') => {
+export const runMonthlyReportJob = async (triggerSource = 'manual') => {
   // Prevent multiple simultaneous executions
   if (isCronJobRunning) {
     console.log('[CRON] Monthly report job already running, skipping. Trigger:', triggerSource)
