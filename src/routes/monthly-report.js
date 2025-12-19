@@ -1,4 +1,4 @@
-import { runMonthlyReportJob } from '../../cronMonthlyReport.js'
+import { runMonthlyReportJob } from '../cronMonthlyReport.js';
 
 export default async function handler(req, res) {
   try {
