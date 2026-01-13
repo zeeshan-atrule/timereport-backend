@@ -43,19 +43,15 @@ const getAuthHeader = () => {
 
 const callMonday = async (query) => {
   try {
-    console.log(`[MONDAY DEBUG] Sending query to Monday.com`);
     const { data } = await mondayClient.post('', { query }, { headers: getAuthHeader() })
-    console.log(`[MONDAY DEBUG] Received response from Monday.com`);
     if (data?.errors?.length) {
       const msg = data.errors[0]?.message || 'Monday.com API error'
       const locations = data.errors[0]?.locations?.map((l) => `${l.line}:${l.column}`).join(', ')
       console.error(`[MONDAY ERROR] ${msg}${locations ? ` (${locations})` : ''}`);
-      console.error(`[MONDAY ERROR] Full error data:`, JSON.stringify(data.errors, null, 2));
       throw new Error(`${msg}${locations ? ` (${locations})` : ''}`)
     }
     if (!data?.data) {
       console.error(`[MONDAY ERROR] Empty response from Monday.com API`);
-      console.error(`[MONDAY ERROR] Full response:`, JSON.stringify(data, null, 2));
       throw new Error('Empty response from Monday.com API')
     }
     return data.data
@@ -161,18 +157,6 @@ export const updateMonthRowForEmployee = async ({
 
   const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"')
 
-  // Debug logging to inspect payload sent to Monday when errors occur
-  console.log('[CRON DEBUG] Updating month row', {
-    boardId,
-    groupId,
-    itemId,
-    monthKey,
-    employeeName: employeeSummary.employeeName,
-    employeeId: employeeSummary.employeeId,
-    clientColumnMap,
-    columnTypes,
-    columnValues
-  })
 
   const mutation = `
     mutation {
@@ -249,19 +233,13 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
     `;
 
     try {
-      console.log(`[CRON DEBUG] Creating subitem for client: ${client.clientName}`);
-      console.log(`[CRON DEBUG] Create mutation:`, createMutation);
       const result = await callMonday(createMutation);
-      console.log(`[CRON DEBUG] Subitem creation result:`, JSON.stringify(result, null, 2));
       const subitemId = result?.create_subitem?.id;
       if (subitemId) {
-        console.log(`[CRON DEBUG] Successfully created subitem ${subitemId} for client ${client.clientName}`);
         createdSubitems.push({
           id: subitemId,
           name: client.clientName || ''
         });
-      } else {
-        console.log(`[CRON DEBUG] Failed to extract subitem ID from result for client ${client.clientName}`);
       }
     } catch (error) {
       console.error(`[CRON] Failed to create subitem for client ${client.clientName}:`, error.message);
@@ -287,16 +265,40 @@ export const fetchBoardColumnsAndGroups = async (boardId) => {
       }
     }
   `
-  const data = await callMonday(query)
-  const board = data?.boards?.[0] || {}
-  return {
-    columns: board.columns || [],
-    groups: board.groups || []
+  try {
+    const data = await callMonday(query)
+    
+    if (!data?.boards || data.boards.length === 0) {
+      console.error(`[MONDAY ERROR] No boards found for boardId=${boardId}. This might indicate a permissions issue or invalid board ID.`);
+      return {
+        columns: [],
+        groups: []
+      }
+    }
+    
+    const board = data.boards[0]
+    if (!board) {
+      console.error(`[MONDAY ERROR] Board data is null for boardId=${boardId}`);
+      return {
+        columns: [],
+        groups: []
+      }
+    }
+    
+    return {
+      columns: board.columns || [],
+      groups: board.groups || []
+    }
+  } catch (error) {
+    console.error(`[MONDAY ERROR] fetchBoardColumnsAndGroups failed for boardId=${boardId}:`, error);
+    return {
+      columns: [],
+      groups: []
+    }
   }
 }
 
 export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pageLimit = 500) => {
-  console.log(`[MONDAY DEBUG] fetchGroupItems called with boardId=${boardId}, groupIds=`, groupIds, `, requestedColumnIds=${requestedColumnIds}`);
   const allItems = []
   let pageCounter = 0
 
@@ -357,12 +359,8 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
     }
   `
 
-  console.log(`[MONDAY DEBUG] Calling initial query for board ${boardId}`);
-  console.log(`[MONDAY DEBUG] Initial query:`, initialQuery);
   const initialData = await callMonday(initialQuery)
-  console.log(`[MONDAY DEBUG] Initial data received:`, JSON.stringify(initialData, null, 2));
   const initialGroups = initialData?.boards?.[0]?.groups || []
-  console.log(`[MONDAY DEBUG] Initial groups:`, initialGroups);
   processGroups(initialGroups, cursorMap)
 
   while (cursorMap.size > 0) {
@@ -409,12 +407,9 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
         }
       `
 
-      console.log(`[MONDAY DEBUG] Calling page query for group ${groupId}`);
       const pageData = await callMonday(pageQuery)
-      console.log(`[MONDAY DEBUG] Page data received for group ${groupId}:`, JSON.stringify(pageData, null, 2));
       pageCounter += 1
       const groupData = pageData?.boards?.[0]?.groups || []
-      console.log(`[MONDAY DEBUG] Group data for ${groupId}:`, groupData);
       processGroups(groupData, cursorMap)
     }
   }
@@ -466,10 +461,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
     }
   });
   
-  if (duplicateItems.length > 0) {
-    console.log(`[DEBUG] Found ${duplicateItems.length} duplicate items:`, duplicateItems);
-  }
-  
   // Remove duplicate items, keeping only the first occurrence
   const uniqueItems = [];
   const seenItemIds = new Set();
@@ -479,8 +470,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       seenItemIds.add(item.id);
     }
   });
-  
-  console.log(`[DEBUG] Original items count: ${items.length}, Unique items count: ${uniqueItems.length}`);
   
   const tasks = []
   const tempNameToId = new Map()
@@ -524,13 +513,10 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
   })
 
   uniqueItems.forEach((item) => {
-    console.log(`[DEBUG] Processing item: ${item.id} - ${item.name}`)
-    
     const columnsValues = item.column_values || []
     const employeeCol = columnsValues.find((col) => col.id === employee)
 
     if (!employeeCol) {
-      console.log(`[DEBUG] No employee column found for item ${item.id}`)
       return
     }
 
@@ -561,11 +547,8 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
 
     const processTimeHistory = (timeCol, colName) => {
       if (!timeCol?.history || !Array.isArray(timeCol.history)) {
-        console.log(`[DEBUG] No history found for ${colName} in item ${item.id}`)
         return
       }
-      
-      console.log(`[DEBUG] Processing ${timeCol.history.length} time entries for ${colName} in item ${item.id}`)
       
       // Track processed entries to avoid duplicates
       const processedEntries = new Set()
@@ -575,7 +558,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
         const entryKey = `${entry.started_at}_${entry.ended_at}_${entry.started_user_id}_${entry.ended_user_id}`
         
         if (processedEntries.has(entryKey)) {
-          console.log(`[DEBUG] Entry ${index} skipped: duplicate entry`)
           return
         }
         processedEntries.add(entryKey)
@@ -587,11 +569,8 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
         let endIso = entry.ended_at || entry.started_at
         const userId = entry.started_user_id || entry.ended_user_id
 
-        console.log(`[DEBUG] Entry ${index}: start=${startIso}, end=${endIso}, user=${userId}`)
-
         // Skip entries without timestamps or user
         if (!startIso || !endIso || !userId) {
-          console.log(`[DEBUG] Entry ${index} skipped: missing start/end/user`)
           return
         }
 
@@ -601,7 +580,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
 
           // Validate time range
           if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
-            console.log(`[DEBUG] Entry ${index} skipped: invalid time range`)
             return
           }
 
@@ -609,7 +587,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
           if (rangeStartMs !== null && rangeEndMs !== null) {
             // Entry is completely outside the range
             if (endTime < rangeStartMs || startTime > rangeEndMs) {
-              console.log(`[DEBUG] Entry ${index} skipped: completely outside date range`)
               return
             }
             
@@ -619,14 +596,11 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
             
             // Ensure valid overlap
             if (clampedEnd <= clampedStart) {
-              console.log(`[DEBUG] Entry ${index} skipped: no valid overlap with date range`)
               return
             }
             
             const durationMs = clampedEnd - clampedStart
             const durationMinutes = Math.floor(durationMs / (1000 * 60))
-            
-            console.log(`[DEBUG] Entry ${index} within range: ${durationMinutes} minutes`)
             
             if (durationMinutes > 0) {
               const currentTime = employeeTimeMap.get(userId) || 0
@@ -640,8 +614,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
             const durationMs = endTime - startTime
             const durationMinutes = Math.floor(durationMs / (1000 * 60))
             
-            console.log(`[DEBUG] Entry ${index} accepted: ${durationMinutes} minutes`)
-            
             if (durationMinutes > 0) {
               const currentTime = employeeTimeMap.get(userId) || 0
               employeeTimeMap.set(userId, currentTime + durationMinutes)
@@ -651,7 +623,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
             }
           }
         } catch (err) {
-          console.warn(`Failed to parse time history entry for item ${item.id}:`, err)
+          // Silently skip invalid entries
         }
       })
     }
@@ -659,15 +631,8 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
     const timeCol1 = columnsValues.find((col) => col.id === timeTracking1)
     const timeCol2 = columnsValues.find((col) => col.id === timeTracking2)
     
-    console.log(`[DEBUG] Found time columns for item ${item.id}: col1=${!!timeCol1}, col2=${!!timeCol2}`)
-    
     if (timeCol1) processTimeHistory(timeCol1, 'timeTracking1')
     if (timeCol2) processTimeHistory(timeCol2, 'timeTracking2')
-
-    console.log(`[DEBUG] After processing time history for item ${item.id}:`, {
-      employeeTimeMap: Array.from(employeeTimeMap.entries()),
-      taskDate
-    })
 
     const allEmployeeEntries = new Map()
     
@@ -676,7 +641,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       const empId = employeeIds[index] || tempNameToId.get(name) || ''
       // Use employee ID as the key if available, otherwise use name
       const key = empId || name || `emp-${index}`
-      console.log(`[DEBUG] Adding employee from column: name=${name}, id=${empId}, key=${key}`);
       allEmployeeEntries.set(key, {
         name,
         id: empId
@@ -692,32 +656,20 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       // We need to check if any existing employee has this ID (and the ID is not empty)
       const alreadyExists = Array.from(allEmployeeEntries.values()).some(emp => emp.id === empIdStr && emp.id !== '');
       
-      console.log(`[DEBUG] Checking time tracking employee: id=${empIdStr}, alreadyExists=${alreadyExists}`);
-      
       if (!alreadyExists && tempIdToName.has(empIdStr)) {
         const empName = tempIdToName.get(empIdStr);
-        console.log(`[DEBUG] Adding employee from time tracking: name=${empName}, id=${empIdStr}`);
         // Use employee ID as the key
         allEmployeeEntries.set(empIdStr, { name: empName, id: empIdStr });
       }
     })
-    
-    console.log(`[DEBUG] Final employee entries:`, Array.from(allEmployeeEntries.entries()));
 
     const employeeList = Array.from(allEmployeeEntries.values())
     const monthKey = taskDate ? taskDate.substring(0, 7) : dateRange?.start?.substring(0, 7) || ''
 
     if (employeeList.length > 0 && employeeTimeMap.size > 0) {
-      console.log(`[DEBUG] Creating tasks for item ${item.id}:`, {
-        employeeList,
-        employeeTimeMap: Array.from(employeeTimeMap.entries()),
-        monthKey
-      })
-      
       employeeList.forEach((emp) => {
         const empTimeMinutes = emp.id && employeeTimeMap.has(emp.id) ? employeeTimeMap.get(emp.id) : 0
         if (empTimeMinutes <= 0) {
-          console.log(`[DEBUG] Skipping ${emp.name}: no time recorded`)
           return
         }
         const effectiveDate = taskDate || dateRange?.start || ''
@@ -731,16 +683,9 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
           month: monthKey,
           timeMinutes: empTimeMinutes
         })
-        
-        console.log(`[DEBUG] Created task for ${emp.name}: ${empTimeMinutes} minutes`)
       })
-    } else {
-      console.log(`[DEBUG] No tasks created for item ${item.id}`)
     }
   })
-
-  console.log(`[DEBUG] Total tasks created: ${tasks.length}`)
-  console.log(`[DEBUG] Sample tasks:`, tasks.slice(0, 3))
   
   return tasks
 }
@@ -767,7 +712,6 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
   const employeeMap = new Map();
   
   // Debug: Log the number of tasks being processed
-  console.log(`[AGGREGATION DEBUG] Processing ${tasks.length} tasks`);
   
   tasks.forEach((task, index) => {
     // Debug: Log each task being processed
@@ -878,32 +822,17 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
     result.totalWorkedHours = Math.round((emp.totalWorkedHours / 60) * 100) / 100;
     result.totalClientHours = Math.round((emp.totalClientHours / 60) * 100) / 100;
 
-    // Debug: Log the final aggregated result for this employee
-    console.log(`[AGGREGATION DEBUG] Final result for ${emp.employeeName}:`, {
-      totalWorkedHours: result.totalWorkedHours,
-      totalClientHours: result.totalClientHours,
-      otherClientsCount: result.otherClients?.length || 0
-    });
-
     return result;
   });
-  
-  // Debug: Log the overall aggregation results
-  console.log(`[AGGREGATION DEBUG] Completed aggregation for ${aggregatedResults.length} employees`);
   
   return aggregatedResults;
 }
 
 // Update subitem worked hours column for an employee
 export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSummary, monthKey) => {
-  console.log('[CRON DEBUG] updateEmployeeSubitemWorkedHours called with:', { targetConfig, employeeSummary, monthKey });
-  
   // Get the employee's group ID from the target config
   // Try to find the group using employeeId first, then employeeName
   let groupId = null;
-  
-  // Log the employeeGroups mapping for debugging
-  console.log('[CRON DEBUG] employeeGroups mapping:', targetConfig.employeeGroups);
   
   // Handle both Map and plain object structures
   const employeeGroups = targetConfig.employeeGroups;
@@ -912,12 +841,10 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
     // Try Map.get() first
     if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeId)) {
       groupId = employeeGroups.get(employeeSummary.employeeId);
-      console.log(`[CRON DEBUG] Found group ${groupId} for employeeId ${employeeSummary.employeeId} (Map)`);
     } 
     // Try plain object access
     else if (employeeGroups?.[employeeSummary.employeeId]) {
       groupId = employeeGroups[employeeSummary.employeeId];
-      console.log(`[CRON DEBUG] Found group ${groupId} for employeeId ${employeeSummary.employeeId} (Object)`);
     }
   }
   
@@ -925,12 +852,10 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
     // Try Map.get() for employeeName
     if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeName)) {
       groupId = employeeGroups.get(employeeSummary.employeeName);
-      console.log(`[CRON DEBUG] Found group ${groupId} for employeeName ${employeeSummary.employeeName} (Map)`);
     }
     // Try plain object access for employeeName
     else if (employeeGroups?.[employeeSummary.employeeName]) {
       groupId = employeeGroups[employeeSummary.employeeName];
-      console.log(`[CRON DEBUG] Found group ${groupId} for employeeName ${employeeSummary.employeeName} (Object)`);
     }
   }
   
@@ -941,7 +866,6 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
       for (const [key, value] of employeeGroups) {
         if (key === String(employeeSummary.employeeId) || key === employeeSummary.employeeName) {
           groupId = value;
-          console.log(`[CRON DEBUG] Found group ${groupId} for key ${key} (Map iteration)`);
           break;
         }
       }
@@ -951,7 +875,6 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
       for (const [key, value] of Object.entries(employeeGroups || {})) {
         if (key === String(employeeSummary.employeeId) || key === employeeSummary.employeeName) {
           groupId = value;
-          console.log(`[CRON DEBUG] Found group ${groupId} for key ${key} (Object iteration)`);
           break;
         }
       }
@@ -959,7 +882,6 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
   }
   
   if (!groupId) {
-    console.log(`[CRON] No group found for employee ${employeeSummary.employeeName} (ID: ${employeeSummary.employeeId})`);
     return;
   }
   
@@ -991,18 +913,11 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
     subitemWorkedHoursColumnId: targetConfig.subitemWorkedHoursColumnId 
   });
   
-  console.log(`[CRON DEBUG] Created ${createdSubitems.length} subitems for item ${itemId}`);
-  console.log(`[CRON DEBUG] Created subitems details:`, JSON.stringify(createdSubitems, null, 2));
-  
-  console.log(`[CRON] Synced ${clientsForSubitems.length} subitems for employee ${employeeSummary.employeeName}`);
 }
 
 // Create items and subitems on target board based on configuration and data
 export const createTargetBoardItems = async (targetConfig, employeeSummaries, monthKey) => {
-  console.log('[TARGET BOARD] createTargetBoardItems called with:', { targetConfig, employeeSummaries, monthKey });
-  
   if (!targetConfig || !employeeSummaries || !Array.isArray(employeeSummaries)) {
-    console.log('[TARGET BOARD] Invalid parameters provided');
     return;
   }
   
@@ -1011,8 +926,6 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
   // Process each employee summary
   for (const employeeSummary of employeeSummaries) {
     try {
-      console.log(`[TARGET BOARD] Processing employee: ${employeeSummary.employeeName}`);
-      
       // Get the employee's group ID from the target config
       let groupId = null;
       const employeeGroups = targetConfig.employeeGroups;
@@ -1034,18 +947,14 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
       }
       
       if (!groupId) {
-        console.log(`[TARGET BOARD] No group found for employee ${employeeSummary.employeeName}`);
         continue;
       }
       
       // Get or create the month item for this employee
       const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey);
       if (!itemId) {
-        console.log(`[TARGET BOARD] Could not get or create month item for ${employeeSummary.employeeName}`);
         continue;
       }
-      
-      console.log(`[TARGET BOARD] Created/found item ${itemId} for employee ${employeeSummary.employeeName}`);
       
       // Update the main item with employee data
       const columnTypes = {}; // TODO: Get actual column types if needed
