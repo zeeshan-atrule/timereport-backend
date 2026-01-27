@@ -19,7 +19,7 @@ router.get('/:boardId', async (req, res, next) => {
 router.post('/:boardId', async (req, res, next) => {
   try {
     const boardId = Number(req.params.boardId)
-    const { columns, groupConfig } = req.body
+    const { columns, groupConfig, excludedEmployees } = req.body
 
     if (!columns?.employee || !columns?.client || !columns?.timeTracking1 || !columns?.timeTracking2) {
       return res.status(400).json({ message: 'Missing required columns' })
@@ -27,7 +27,13 @@ router.post('/:boardId', async (req, res, next) => {
 
     const config = await Configuration.findOneAndUpdate(
       { boardId },
-      { $set: { columns, groupConfig: groupConfig || {} } },
+      {
+        $set: {
+          columns,
+          groupConfig: groupConfig || {},
+          excludedEmployees: Array.isArray(excludedEmployees) ? excludedEmployees : []
+        }
+      },
       { upsert: true, new: true }
     )
 
@@ -38,5 +44,7 @@ router.post('/:boardId', async (req, res, next) => {
 })
 
 export default router
+
+
 
 

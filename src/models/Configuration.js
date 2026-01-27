@@ -14,7 +14,8 @@ const ConfigurationSchema = new mongoose.Schema(
   {
     boardId: { type: Number, required: true, index: true, unique: true },
     columns: { type: ColumnSchema, required: true },
-    groupConfig: { type: Map, of: [String], default: {} }
+    groupConfig: { type: Map, of: [String], default: {} },
+    excludedEmployees: { type: [String], default: [] }
   },
   {
     timestamps: true
@@ -22,5 +23,7 @@ const ConfigurationSchema = new mongoose.Schema(
 )
 
 export default mongoose.model('Configuration', ConfigurationSchema)
+
+
 
 

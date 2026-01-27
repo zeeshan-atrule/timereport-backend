@@ -249,3 +249,14 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
 //     await runMonthlyReportJob('cron-last-day-midnight')
 //   })
 // }
+// const configs = await Configuration.find({})
+//       for (const config of configs) {
+//         if (config.boardId) {
+//           await syncMonthlyGroupConfig(config.boardId)
+//         }
+//       }
+//     } catch (err) {
+//       console.error('[CRON] Error triggering group sync:', err)
+//     }
+//   })
+// }
