@@ -1,7 +1,6 @@
-const express = require('express');
+import express from 'express';
 const router = express.Router();
-const AuditLog = require('../models/AuditLog'); // MongoDB Model baad mein banayenge
-
+import AuditLog from '../models/AuditLogs.js';
 // POST Endpoint to save audit log
 router.post('/audit-logs', async (req, res) => {
   try {
@@ -36,4 +35,4 @@ router.post('/audit-logs', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;
