@@ -29,7 +29,6 @@ app.use(morgan('dev'))
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' })
 })
-const auditLogRoutes = require('./routes/auditLogs');
 app.use('/api/config', configRoutes)
 app.use('/api/sync', syncRoutes)
 app.use('/api/target-config', targetConfigRoutes)
