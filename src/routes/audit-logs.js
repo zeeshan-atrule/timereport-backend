@@ -1,7 +1,8 @@
 import express from 'express';
 const router = express.Router();
 import AuditLog from '../models/AuditLogs.js';
-// POST Endpoint to save audit log
+
+// POST Endpoint to save or update audit log
 router.post('/audit-logs', async (req, res) => {
   try {
     const { userId, userName, userEmail, boardId, queryType, executedQuery, queryResponse, timestamp } = req.body;
@@ -11,23 +12,31 @@ router.post('/audit-logs', async (req, res) => {
       return res.status(400).json({ error: 'Query details are required' });
     }
 
-    // 2. Naya Log Entry create karein
-    const newLog = new AuditLog({
-      userId: userId || 'unknown', // Agar frontend se nahi aaya to default
-      userName: userName || 'Guest',
-      userEmail: userEmail || '',
-      boardId: boardId,
-      queryType: queryType,
-      executedQuery: executedQuery,
-      queryResponse: queryResponse, // MongoDB isse JSON format mein save kar dega
-      timestamp: timestamp || new Date()
-    });
+    // 2. Logic: Find user and Update, OR Create new if not found (Upsert)
+    // Hum yahan 'userId' ko base bana rahe hain.
+    
+    const updatedLog = await AuditLog.findOneAndUpdate(
+      { userId: userId || 'unknown' }, // Filter: Is userId ko dhundo
+      {
+        $set: {
+          userName: userName || 'Guest',
+          userEmail: userEmail || '',
+          boardId: boardId,
+          queryType: queryType,
+          executedQuery: executedQuery,     // Yeh purana value ko overwrite karega
+          queryResponse: queryResponse,     // Yeh purana value ko overwrite karega
+          timestamp: timestamp || new Date() // Timestamp update ho jayegi
+        }
+      },
+      { 
+        new: true,   // Return the updated document
+        upsert: true, // Agar document nahi mila toh NAYA bana do (Create)
+        setDefaultsOnInsert: true 
+      }
+    );
 
-    // 3. Database mein Save karein
-    const savedLog = await newLog.save();
-
-    console.log(`Audit Log Saved: ${savedLog._id}`);
-    res.status(201).json({ message: 'Log saved successfully', id: savedLog._id });
+    console.log(`Audit Log Saved/Updated for User: ${updatedLog.userId}`);
+    res.status(201).json({ message: 'Log saved successfully', id: updatedLog._id });
 
   } catch (error) {
     console.error('Error saving audit log:', error);
