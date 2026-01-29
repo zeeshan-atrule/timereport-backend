@@ -9,7 +9,7 @@ import configRoutes from './routes/config.js'
 import syncRoutes from './routes/sync.js'
 import targetConfigRoutes from './routes/targetConfig.js'
 import monthlyReportHandler from './routes/monthly-report.js' // Import the monthly report handler
-
+import auditLogRoutes from './routes/audit-logs.js'
 dotenv.config()
 
 const app = express()
@@ -29,11 +29,11 @@ app.use(morgan('dev'))
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' })
 })
-
 app.use('/api/config', configRoutes)
 app.use('/api/sync', syncRoutes)
 app.use('/api/target-config', targetConfigRoutes)
 app.get('/api/cron/monthly-report', monthlyReportHandler) // Register the cron job route
+app.use('/api', auditLogRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error(err)
