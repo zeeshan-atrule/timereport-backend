@@ -3,7 +3,7 @@ import Configuration from './models/Configuration.js'
 import MonthlyReport from './models/MonthlyReport.js'
 import TargetBoardConfig from './models/TargetBoardConfig.js'
 import { fetchGroupItems, buildTasksFromItems, updateMonthRowForEmployee, updateEmployeeSubitemWorkedHours, createTargetBoardItems, fetchBoardColumnsAndGroups } from './services/monday.js'
-
+import { decrypt } from './utils/crypto.js'
 const getCurrentMonthRange = () => {
   const now = new Date()
   const year = now.getUTCFullYear()
@@ -33,7 +33,6 @@ const getCurrentMonthRange = () => {
   return { start: toStr(start), end: toStr(end), key, name }
 }
 
-// Helper: check if "today" is the last calendar day of the current month
 const isLastDayOfMonth = () => {
   const today = new Date()
   const tomorrow = new Date(today)
@@ -43,24 +42,23 @@ const isLastDayOfMonth = () => {
 
 let isCronJobRunning = false;
 
-// Function to update group configuration for all months
-// It finds groups matching month names (e.g., "January 2026", "December 2025")
-// and updates them in the configuration while keeping other groups unchanged
-const updateAllMonthsGroupConfig = async (config) => {
+// === CHANGE: Accept apiToken parameter ===
+const updateAllMonthsGroupConfig = async (config, apiToken) => {
+// ===================================
   try {
     const monthNames = [
       'January', 'February', 'March', 'April', 'May', 'June',
       'July', 'August', 'September', 'October', 'November', 'December'
     ];
     
-    // Fetch all groups from Monday.com board (only once)
-    const { groups } = await fetchBoardColumnsAndGroups(config.boardId);
+    // === PASS TOKEN TO FETCH FUNCTION ===
+    const { groups } = await fetchBoardColumnsAndGroups(config.boardId, apiToken);
+    // =================================
     
     if (groups.length === 0) {
       return;
     }
     
-    // Create a map of month names to group IDs (e.g., "January 2026" -> "group_id")
     const monthGroupMap = new Map();
     const monthNamePattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})$/;
     
@@ -77,7 +75,6 @@ const updateAllMonthsGroupConfig = async (config) => {
       }
     });
     
-    // Get all month keys from configuration
     const groupConfigObj = config.groupConfig instanceof Map
       ? Object.fromEntries(config.groupConfig)
       : config.groupConfig || {};
@@ -87,7 +84,6 @@ const updateAllMonthsGroupConfig = async (config) => {
     let updatedCount = 0;
     let needsSave = false;
     
-    // Process each month in the configuration
     for (const monthKey of allMonthKeys) {
       const currentGroups = groupConfigObj[monthKey] || [];
       
@@ -95,17 +91,14 @@ const updateAllMonthsGroupConfig = async (config) => {
         continue;
       }
       
-      // Find the month group for this month key
       const monthGroup = monthGroupMap.get(monthKey);
       
       if (!monthGroup) {
         continue;
       }
       
-      // Create a map of group IDs to titles for current groups
       const groupMap = new Map(groups.map(g => [g.id, g.title]));
       
-      // Find which of the current groups matches a month name pattern
       let monthGroupIdToReplace = null;
       const otherGroups = [];
       
@@ -118,11 +111,9 @@ const updateAllMonthsGroupConfig = async (config) => {
         }
       }
       
-      // If we found a month-named group to replace, update it
       if (monthGroupIdToReplace) {
         const updatedGroups = [...otherGroups, monthGroup.id];
         
-        // Update the configuration
         if (config.groupConfig instanceof Map) {
           config.groupConfig.set(monthKey, updatedGroups);
         } else {
@@ -135,7 +126,6 @@ const updateAllMonthsGroupConfig = async (config) => {
         updatedCount++;
         needsSave = true;
       } else if (!currentGroups.includes(monthGroup.id)) {
-        // If no month-named group found but month group is not in the list, add it
         const updatedGroups = [...otherGroups, monthGroup.id];
         
         if (config.groupConfig instanceof Map) {
@@ -152,19 +142,15 @@ const updateAllMonthsGroupConfig = async (config) => {
       }
     }
     
-    // Save configuration if any updates were made
     if (needsSave) {
       await config.save();
     }
   } catch (err) {
     console.error(`[GROUP UPDATE] Error updating group config for board ${config.boardId}:`, err);
-    // Don't throw - we don't want to break the main cron job if group update fails
   }
 };
 
-// Core job logic shared by both schedules
 export const runMonthlyReportJob = async (triggerSource = 'manual') => {
-  // Prevent multiple simultaneous executions
   if (isCronJobRunning) {
     return
   }
@@ -177,7 +163,16 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
       const boardId = config.boardId
       const monthRange = getCurrentMonthRange()
       
-      // Fetch target board config for subitem columns
+      // === EXTRACT TOKEN FROM CONFIG ===
+      const apiToken = config.apiToken ? decrypt(config.apiToken) : null;
+      
+      // Check if token exists
+      if (!apiToken) {
+        console.error(`[CRON] No API Token found in configuration for board ${boardId}. Skipping.`);
+        continue;
+      }
+      // ==================================
+      
       const targetConfig = await TargetBoardConfig.findOne({ sourceBoardId: boardId })
       const targetGroups = config.groupConfig?.get
         ? config.groupConfig.get(monthRange.key)
@@ -194,13 +189,17 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
         .filter(Boolean)
         .map((id) => `"${id}"`)
         .join(',')
-      const items = await fetchGroupItems(boardId, targetGroups, requestedColumnIds, 500)
+      
+      // === PASS TOKEN TO FETCH ITEMS ===
+      const items = await fetchGroupItems(boardId, targetGroups, requestedColumnIds, 500, apiToken)
+      // ===============================
+      
       const rawTasks = buildTasksFromItems(items, config.columns, { start: monthRange.start, end: monthRange.end });
+      
       const mod = await import('./services/monday.js')
       const tasks = mod.aggregateTasksByEmployeeClientMonth(rawTasks)
-      // Delete previous report for this board and month
+      
       await MonthlyReport.deleteOne({ boardId, monthKey: monthRange.key })
-      // Insert new report
       await MonthlyReport.create({
         boardId,
         monthKey: monthRange.key,
@@ -209,54 +208,24 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
         generatedAt: new Date()
       })
       
-      // Update the target board with items and subitems
       if (targetConfig) {
         const monthlyReport = await MonthlyReport.findOne({ boardId, monthKey: monthRange.key })
         if (monthlyReport && Array.isArray(monthlyReport.tasks)) {
-          // Use monthName (e.g. "December 2025") on the board; fall back to monthKey if not present
           const monthLabel = monthlyReport.monthName || monthRange.name || monthRange.key
-          // Use the new consolidated function to create items and subitems
-          await createTargetBoardItems(targetConfig, monthlyReport.tasks, monthLabel);
+          
+          // === PASS TOKEN TO CREATE TARGET ITEMS ===
+          await createTargetBoardItems(targetConfig, monthlyReport.tasks, monthLabel, apiToken);
+          // ======================================
         }
       }
       
-      // Update group configuration for all months
-      // This finds groups matching month names and updates them in the configuration
-      await updateAllMonthsGroupConfig(config);
+      // === PASS TOKEN TO UPDATE GROUP CONFIG ===
+      await updateAllMonthsGroupConfig(config, apiToken);
+      // =======================================
     }
   } catch (err) {
     console.error('[CRON] Error syncing monthly reports:', err)
   } finally {
-    // Reset the flag when the job completes (success or failure)
     isCronJobRunning = false;
   }
 }
-
-// export const startMonthlyReportCron = () => {
-//   // Existing high-frequency cron (for testing) – currently every minute
-//   cron.schedule('*/1 * * * *', async () => {
-//     await runMonthlyReportJob('cron-every-minute')
-//   })
-
-//   // New production-like cron: run every day at 00:00 server time,
-//   // but only execute logic if it's the last day of the month
-//   cron.schedule('0 0 * * *', async () => {
-//     if (!isLastDayOfMonth()) {
-//       console.log('[CRON] Midnight daily check – not last day of month, skipping job')
-//       return
-//     }
-
-//     await runMonthlyReportJob('cron-last-day-midnight')
-//   })
-// }
-// const configs = await Configuration.find({})
-//       for (const config of configs) {
-//         if (config.boardId) {
-//           await syncMonthlyGroupConfig(config.boardId)
-//         }
-//       }
-//     } catch (err) {
-//       console.error('[CRON] Error triggering group sync:', err)
-//     }
-//   })
-// }

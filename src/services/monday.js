@@ -1,3 +1,41 @@
+import axios from 'axios'
+
+const mondayClient = axios.create({
+  baseURL: 'https://api.monday.com/v2/',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  timeout: 30000
+})
+
+// Updated to accept token from parameters
+const getAuthHeader = (apiToken) => {
+  if (!apiToken) {
+    throw new Error('Missing API Token from Configuration')
+  }
+  return { Authorization: apiToken }
+}
+
+const callMonday = async (query, apiToken) => {
+  try {
+    const { data } = await mondayClient.post('', { query }, { headers: getAuthHeader(apiToken) })
+    if (data?.errors?.length) {
+      const msg = data.errors[0]?.message || 'Monday.com API error'
+      const locations = data.errors[0]?.locations?.map((l) => `${l.line}:${l.column}`).join(', ')
+      console.error(`[MONDAY ERROR] ${msg}${locations ? ` (${locations})` : ''}`);
+      throw new Error(`${msg}${locations ? ` (${locations})` : ''}`)
+    }
+    if (!data?.data) {
+      console.error(`[MONDAY ERROR] Empty response from Monday.com API`);
+      throw new Error('Empty response from Monday.com API')
+    }
+    return data.data
+  } catch (error) {
+    console.error(`[MONDAY ERROR] Network error:`, error.message);
+    throw error;
+  }
+}
+
 // Simple aggregation: all time for all employees/clients/months (flat array)
 export const buildFlatEmployeeClientMonthAggregation = (tasks) => {
   // Returns array of { employee, employeeId, client, month, totalMinutes }
@@ -18,53 +56,17 @@ export const buildFlatEmployeeClientMonthAggregation = (tasks) => {
   return Array.from(map.values());
 };
 
-// Legacy aggregation used by /api/sync – now internally delegates to the
-// same employee/client/month aggregation as the cron job so that the shape
+// Legacy aggregation used by /api/sync – now internally delegates to
+// same employee/client/month aggregation as cron job so that the shape
 // (including totalWorkedHours and totalClientHours) is consistent.
-export const aggregateTasksByEmployeeMonthClient = (tasks) => {
+export const aggregateTasksByEmployeeMonth = (tasks) => {
   return aggregateTasksByEmployeeClientMonth(tasks);
 };
-import axios from 'axios'
-
-const mondayClient = axios.create({
-  baseURL: 'https://api.monday.com/v2/',
-  headers: {
-    'Content-Type': 'application/json'
-  },
-  timeout: 30000
-})
-
-const getAuthHeader = () => {
-  if (!process.env.MONDAY_API_TOKEN) {
-    throw new Error('Missing MONDAY_API_TOKEN')
-  }
-  return { Authorization: process.env.MONDAY_API_TOKEN }
-}
-
-const callMonday = async (query) => {
-  try {
-    const { data } = await mondayClient.post('', { query }, { headers: getAuthHeader() })
-    if (data?.errors?.length) {
-      const msg = data.errors[0]?.message || 'Monday.com API error'
-      const locations = data.errors[0]?.locations?.map((l) => `${l.line}:${l.column}`).join(', ')
-      console.error(`[MONDAY ERROR] ${msg}${locations ? ` (${locations})` : ''}`);
-      throw new Error(`${msg}${locations ? ` (${locations})` : ''}`)
-    }
-    if (!data?.data) {
-      console.error(`[MONDAY ERROR] Empty response from Monday.com API`);
-      throw new Error('Empty response from Monday.com API')
-    }
-    return data.data
-  } catch (error) {
-    console.error(`[MONDAY ERROR] Network error:`, error.message);
-    throw error;
-  }
-}
 
 // --- Helpers for writing monthly summaries to a target board ---
 
 // Find or create an item within a group representing a given monthKey (e.g. "2025-12")
-export const getOrCreateMonthItem = async (boardId, groupId, monthKey) => {
+export const getOrCreateMonthItem = async (boardId, groupId, monthKey, apiToken) => {
   const query = `
     query {
       boards(ids: ${boardId}) {
@@ -80,7 +82,7 @@ export const getOrCreateMonthItem = async (boardId, groupId, monthKey) => {
     }
   `
 
-  const data = await callMonday(query)
+  const data = await callMonday(query, apiToken)
   const items = data?.boards?.[0]?.groups?.[0]?.items_page?.items || []
   const existing = items.find((i) => i?.name === monthKey)
   if (existing) return existing.id
@@ -96,11 +98,11 @@ export const getOrCreateMonthItem = async (boardId, groupId, monthKey) => {
       }
     }
   `
-  const mData = await callMonday(mutation)
+  const mData = await callMonday(mutation, apiToken)
   return mData?.create_item?.id
 }
 
-// Update one employee's month row on the target board using mapping:
+// Update one employee's month row on target board using mapping:
 // groupClientColumns[groupId][clientName] -> columnId
 // columnTypes: map of columnId -> monday column type (e.g. 'numbers', 'text')
 export const updateMonthRowForEmployee = async ({
@@ -111,9 +113,10 @@ export const updateMonthRowForEmployee = async ({
   clientColumnMap,
   totalWorkedHoursColumnId,
   totalClientHoursColumnId,
-  columnTypes
+  columnTypes,
+  apiToken
 }) => {
-  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey)
+  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken)
   if (!itemId) return
 
   const columnValues = {}
@@ -123,7 +126,7 @@ export const updateMonthRowForEmployee = async ({
     const strVal = String(value)
     const colType = columnTypes?.[columnId]
 
-    // For change_multiple_column_values via GraphQL, the value should be the raw value,
+    // For change_multiple_column_values via GraphQL, value should be raw value,
     // not an object. Numbers/text both accept a simple string representation.
     // We still skip complex/unsupported types.
     if (colType === 'numbers' || colType === 'numeric' || colType === 'text' || colType === 'long-text' || !colType) {
@@ -133,7 +136,7 @@ export const updateMonthRowForEmployee = async ({
   }
 
   Object.entries(employeeSummary).forEach(([key, value]) => {
-    if (key === 'employeeName' || key === 'employeeId' || key === 'otherClients') {
+    if (key === 'employeeName' || key === 'employeeId' || key === 'otherClients' || key === 'allClients') {
       return
     }
 
@@ -170,13 +173,13 @@ export const updateMonthRowForEmployee = async ({
     }
   `
 
-  await callMonday(mutation)
+  await callMonday(mutation, apiToken)
   return itemId
 }
 
 // Replace existing "other clients" subitems for a month row with fresh ones
-// Returns the newly created subitems
-export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, subitemWorkedHoursColumnId }) => {
+// Returns newly created subitems
+export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, subitemWorkedHoursColumnId, apiToken }) => {
   if (!parentItemId || !Array.isArray(otherClients) || otherClients.length === 0) return []
 
   // Fetch existing subitems
@@ -191,7 +194,7 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
     }
   `
 
-  const data = await callMonday(query)
+  const data = await callMonday(query, apiToken)
   const subitems = data?.items?.[0]?.subitems || []
 
   // Archive existing subitems to avoid duplicates
@@ -204,14 +207,14 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
         }
       }
     `
-    await callMonday(archiveMutation)
+    await callMonday(archiveMutation, apiToken)
   }
 
   // Create new subitems from otherClients (using item_name as client name and setting worked hours column)
   // And collect the created subitems to return them
   const createdSubitems = [];
   for (const client of otherClients) {
-    // Prepare column values for the subitem creation
+    // Prepare column values for subitem creation
     let columnValuesParam = '';
     if (subitemWorkedHoursColumnId && (client.hours || client.hours === 0)) {
       const columnValues = {};
@@ -233,7 +236,7 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
     `;
 
     try {
-      const result = await callMonday(createMutation);
+      const result = await callMonday(createMutation, apiToken);
       const subitemId = result?.create_subitem?.id;
       if (subitemId) {
         createdSubitems.push({
@@ -249,7 +252,7 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
   return createdSubitems;
 }
 
-export const fetchBoardColumnsAndGroups = async (boardId) => {
+export const fetchBoardColumnsAndGroups = async (boardId, apiToken) => {
   const query = `
     query {
       boards(ids: ${boardId}) {
@@ -266,7 +269,7 @@ export const fetchBoardColumnsAndGroups = async (boardId) => {
     }
   `
   try {
-    const data = await callMonday(query)
+    const data = await callMonday(query, apiToken)
     
     if (!data?.boards || data.boards.length === 0) {
       console.error(`[MONDAY ERROR] No boards found for boardId=${boardId}. This might indicate a permissions issue or invalid board ID.`);
@@ -298,7 +301,7 @@ export const fetchBoardColumnsAndGroups = async (boardId) => {
   }
 }
 
-export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pageLimit = 500) => {
+export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pageLimit = 500, apiToken) => {
   const allItems = []
   let pageCounter = 0
 
@@ -359,7 +362,7 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
     }
   `
 
-  const initialData = await callMonday(initialQuery)
+  const initialData = await callMonday(initialQuery, apiToken)
   const initialGroups = initialData?.boards?.[0]?.groups || []
   processGroups(initialGroups, cursorMap)
 
@@ -407,7 +410,7 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
         }
       `
 
-      const pageData = await callMonday(pageQuery)
+      const pageData = await callMonday(pageQuery, apiToken)
       pageCounter += 1
       const groupData = pageData?.boards?.[0]?.groups || []
       processGroups(groupData, cursorMap)
@@ -647,7 +650,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       })
     })
 
-    // Then, add any employees from time tracking that aren't already in the list
+    // Then, add any employees from time tracking that aren't already in our list
     employeeTimeMap.forEach((_time, empId) => {
       // Only add if this employee isn't already in our list
       const empIdStr = String(empId)
@@ -673,6 +676,8 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
           return
         }
         const effectiveDate = taskDate || dateRange?.start || ''
+        const effectiveMonth = monthKey || (dateRange ? dateRange.start.substring(0, 7) : '')
+        
         tasks.push({
           id: item.id,
           task: item.name || '',
@@ -680,7 +685,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
           employeeId: emp.id || '',
           client: clientValue,
           date: effectiveDate,
-          month: monthKey,
+          month: effectiveMonth,
           timeMinutes: empTimeMinutes
         })
       })
@@ -689,7 +694,6 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
   
   return tasks
 }
-
 
 // Nested aggregation: one object per employee.
 // Final shape example:
@@ -711,7 +715,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
   // Internal map: employeeId or name -> aggregation buckets
   const employeeMap = new Map();
   
-  // Debug: Log the number of tasks being processed
+  // Debug: Log number of tasks being processed
   
   tasks.forEach((task, index) => {
     // Debug: Log each task being processed
@@ -766,6 +770,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
       empObj.totalClientHours += task.timeMinutes || 0;
     }
   });
+  
   // Merge duplicate clients (same name/month) in each array and sum minutes
   const mergeClients = (clients) => {
     const map = new Map();
@@ -829,7 +834,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
 }
 
 // Update subitem worked hours column for an employee
-export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSummary, monthKey) => {
+export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSummary, monthKey, apiToken) => {
   // Get the employee's group ID from the target config
   // Try to find the group using employeeId first, then employeeName
   let groupId = null;
@@ -887,7 +892,7 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
   
   // Get or create the month item for this employee
   const boardId = targetConfig.targetBoardId;
-  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey);
+  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
   
   if (!itemId) {
     console.log(`[CRON] Could not get or create month item for ${employeeSummary.employeeName}`);
@@ -905,18 +910,18 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
     return;
   }
   
-  // Sync the subitems (create new ones, archive old ones) with worked hours column values set during creation.
+  // Sync subitems (create new ones, archive old ones) with worked hours column values set during creation.
   // Note: we reuse the generic syncOtherClientsAsSubitems helper, but we now pass ALL clients.
   const createdSubitems = await syncOtherClientsAsSubitems({ 
     parentItemId: itemId,
     otherClients: clientsForSubitems,
-    subitemWorkedHoursColumnId: targetConfig.subitemWorkedHoursColumnId 
+    subitemWorkedHoursColumnId: targetConfig.subitemWorkedHoursColumnId,
+    apiToken
   });
-  
 }
 
-// Create items and subitems on target board based on configuration and data
-export const createTargetBoardItems = async (targetConfig, employeeSummaries, monthKey) => {
+// Create items and subitems on the target board based on configuration and data
+export const createTargetBoardItems = async (targetConfig, employeeSummaries, monthKey, apiToken) => {
   if (!targetConfig || !employeeSummaries || !Array.isArray(employeeSummaries)) {
     return;
   }
@@ -951,7 +956,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
       }
       
       // Get or create the month item for this employee
-      const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey);
+      const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
       if (!itemId) {
         continue;
       }
@@ -975,7 +980,8 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
         clientColumnMap,
         totalWorkedHoursColumnId: targetConfig.totalWorkedHoursColumnId,
         totalClientHoursColumnId: targetConfig.totalClientHoursColumnId,
-        columnTypes
+        columnTypes,
+        apiToken
       });
       
       // Create subitems for clients if configured.
@@ -985,7 +991,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
         (Array.isArray(employeeSummary.otherClients) && employeeSummary.otherClients.length > 0);
 
       if (targetConfig.subitemWorkedHoursColumnId && hasAnyClientsForSubitems) {
-        await updateEmployeeSubitemWorkedHours(targetConfig, employeeSummary, monthKey);
+        await updateEmployeeSubitemWorkedHours(targetConfig, employeeSummary, monthKey, apiToken);
       }
       
       console.log(`[TARGET BOARD] Successfully processed employee ${employeeSummary.employeeName}`);
