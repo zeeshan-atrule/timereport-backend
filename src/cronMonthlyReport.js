@@ -164,7 +164,7 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
       const monthRange = getCurrentMonthRange()
       
       // === EXTRACT TOKEN FROM CONFIG ===
-      const apiToken = config.apiToken ? decrypt(config.apiToken) : null;
+      const apiToken = config.apiToken || null;
       
       // Check if token exists
       if (!apiToken) {
