@@ -1,6 +1,5 @@
 import { Router } from 'express'
 import Configuration from '../models/Configuration.js'
-import { encrypt, decrypt } from '../utils/crypto.js'
 
 const router = Router()
 
@@ -11,12 +10,12 @@ router.get('/:boardId', async (req, res, next) => {
     if (!config) {
       return res.status(404).json({ message: 'Configuration not found' })
     }
-    const decryptedToken = config.apiToken ? decrypt(config.apiToken) : null;
-     const configForFrontend = {
-      ...config.toObject(),  // Mongoose document → plain JS object
-      apiToken: decryptedToken // replace encrypted token with decrypted token
-    }
-    res.json(configForFrontend)
+    // const decryptedToken = config.apiToken ? decrypt(config.apiToken) : null;
+    //  const configForFrontend = {
+    //   ...config.toObject(),  // Mongoose document → plain JS object
+    //   apiToken: decryptedToken // replace encrypted token with decrypted token
+    // }
+    res.json(config)
   } catch (err) {
     next(err)
   }
@@ -34,7 +33,7 @@ router.get('/', async (req, res, next) => {
         ...obj,
         apiToken:
           includeToken === 'true' && obj.apiToken
-            ? decrypt(obj.apiToken)
+            ? obj.apiToken
             : undefined // hide token by default
       };
     });
@@ -80,7 +79,7 @@ router.post('/:boardId', async (req, res, next) => {
           userId: userId || null,
           userName: userName || null,
           userEmail: userEmail || null,
-          apiToken: apiToken ? encrypt(apiToken) :null
+          apiToken: apiToken || null
         }
       },
       { upsert: true, new: true }
