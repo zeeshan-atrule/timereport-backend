@@ -2,9 +2,7 @@ name: Monthly Report Cron
 
 on:
   schedule:
-    # Runs at 00:00 on the 1st of every month
     - cron: '0 0 1 * *'
-  # This allows you to run it manually for testing
   workflow_dispatch:
 
 jobs:
@@ -14,6 +12,6 @@ jobs:
       - name: Call Monthly Report API
         run: |
           curl --request GET \
-               --url "https://timereport-backend.vercel.app" \
+               --url "https://timereport-backend.vercel.app/api/cron/monthly-report" \
                --max-time 900 \
                --fail-with-body
