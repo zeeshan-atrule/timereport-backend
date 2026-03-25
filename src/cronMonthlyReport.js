@@ -159,69 +159,80 @@ export const runMonthlyReportJob = async (triggerSource = 'manual') => {
 
   try {
     const configs = await Configuration.find({})
-    for (const config of configs) {
-      const boardId = config.boardId
-      const monthRange = getCurrentMonthRange()
+    
+    // Process configs in batches concurrently
+    const configBatchSize = 3;
+    for (let i = 0; i < configs.length; i += configBatchSize) {
+      const batchConfigs = configs.slice(i, i + configBatchSize);
       
-      // === EXTRACT TOKEN FROM CONFIG ===
-      const apiToken = config.apiToken || null;
-      
-      // Check if token exists
-      if (!apiToken) {
-        console.error(`[CRON] No API Token found in configuration for board ${boardId}. Skipping.`);
-        continue;
-      }
-      // ==================================
-      
-      const targetConfig = await TargetBoardConfig.findOne({ sourceBoardId: boardId })
-      const targetGroups = config.groupConfig?.get
-        ? config.groupConfig.get(monthRange.key)
-        : config.groupConfig?.[monthRange.key]
-      if (!targetGroups || targetGroups.length === 0) {
-        continue;
-      }
-      const requestedColumnIds = [
-        config.columns.employee,
-        config.columns.client,
-        config.columns.timeTracking1,
-        config.columns.timeTracking2
-      ]
-        .filter(Boolean)
-        .map((id) => `"${id}"`)
-        .join(',')
-      
-      // === PASS TOKEN TO FETCH ITEMS ===
-      const items = await fetchGroupItems(boardId, targetGroups, requestedColumnIds, 500, apiToken)
-      // ===============================
-      
-      const rawTasks = buildTasksFromItems(items, config.columns, { start: monthRange.start, end: monthRange.end });
-      
-      const mod = await import('./services/monday.js')
-      const tasks = mod.aggregateTasksByEmployeeClientMonth(rawTasks)
-      
-      await MonthlyReport.deleteOne({ boardId, monthKey: monthRange.key })
-      await MonthlyReport.create({
-        boardId,
-        monthKey: monthRange.key,
-        monthName: monthRange.name,
-        tasks,
-        generatedAt: new Date()
-      })
-      
-      if (targetConfig) {
-        const monthlyReport = await MonthlyReport.findOne({ boardId, monthKey: monthRange.key })
-        if (monthlyReport && Array.isArray(monthlyReport.tasks)) {
-          const monthLabel = monthlyReport.monthName || monthRange.name || monthRange.key
+      await Promise.all(batchConfigs.map(async (config) => {
+        try {
+          const boardId = config.boardId
+          const monthRange = getCurrentMonthRange()
           
-          // === PASS TOKEN TO CREATE TARGET ITEMS ===
-          await createTargetBoardItems(targetConfig, monthlyReport.tasks, monthLabel, apiToken);
-          // ======================================
+          // === EXTRACT TOKEN FROM CONFIG ===
+          const apiToken = config.apiToken || null;
+          
+          // Check if token exists
+          if (!apiToken) {
+            console.error(`[CRON] No API Token found in configuration for board ${boardId}. Skipping.`);
+            return;
+          }
+          // ==================================
+          
+          const targetConfig = await TargetBoardConfig.findOne({ sourceBoardId: boardId })
+          const targetGroups = config.groupConfig?.get
+            ? config.groupConfig.get(monthRange.key)
+            : config.groupConfig?.[monthRange.key]
+          if (!targetGroups || targetGroups.length === 0) {
+            return;
+          }
+          const requestedColumnIds = [
+            config.columns.employee,
+            config.columns.client,
+            config.columns.timeTracking1,
+            config.columns.timeTracking2
+          ]
+            .filter(Boolean)
+            .map((id) => `"${id}"`)
+            .join(',')
+          
+          // === PASS TOKEN TO FETCH ITEMS ===
+          const items = await fetchGroupItems(boardId, targetGroups, requestedColumnIds, 500, apiToken)
+          // ===============================
+          
+          const rawTasks = buildTasksFromItems(items, config.columns, { start: monthRange.start, end: monthRange.end });
+          
+          const mod = await import('./services/monday.js')
+          const tasks = mod.aggregateTasksByEmployeeClientMonth(rawTasks)
+          
+          await MonthlyReport.deleteOne({ boardId, monthKey: monthRange.key })
+          await MonthlyReport.create({
+            boardId,
+            monthKey: monthRange.key,
+            monthName: monthRange.name,
+            tasks,
+            generatedAt: new Date()
+          })
+          
+          if (targetConfig) {
+            const monthlyReport = await MonthlyReport.findOne({ boardId, monthKey: monthRange.key })
+            if (monthlyReport && Array.isArray(monthlyReport.tasks)) {
+              const monthLabel = monthlyReport.monthName || monthRange.name || monthRange.key
+              
+              // === PASS TOKEN TO CREATE TARGET ITEMS ===
+              await createTargetBoardItems(targetConfig, monthlyReport.tasks, monthLabel, apiToken);
+              // ======================================
+            }
+          }
+          
+          // === PASS TOKEN TO UPDATE GROUP CONFIG ===
+          await updateAllMonthsGroupConfig(config, apiToken);
+          // =======================================
+        } catch (err) {
+          console.error(`[CRON] Error processing config for board ${config.boardId}:`, err);
         }
-      }
-      
-      // === PASS TOKEN TO UPDATE GROUP CONFIG ===
-      await updateAllMonthsGroupConfig(config, apiToken);
-      // =======================================
+      }));
     }
   } catch (err) {
     console.error('[CRON] Error syncing monthly reports:', err)

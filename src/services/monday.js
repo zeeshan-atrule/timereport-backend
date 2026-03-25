@@ -388,7 +388,8 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
       break
     }
 
-    for (const [groupId, cursor] of Array.from(cursorMap.entries())) {
+    const activeGroups = Array.from(cursorMap.entries());
+    await Promise.all(activeGroups.map(async ([groupId, cursor]) => {
       const cursorPart = cursor ? `, cursor: "${cursor}"` : ''
       const pageQuery = `
         query {
@@ -431,7 +432,7 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
       pageCounter += 1
       const groupData = pageData?.boards?.[0]?.groups || []
       processGroups(groupData, cursorMap)
-    }
+    }));
   }
 
   return allItems
@@ -944,7 +945,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
   }
   
   const boardId = targetConfig.targetBoardId;
-  const batchSize = 5;
+  const batchSize = 15;
   
   // Process employee summaries in batches
   for (let i = 0; i < employeeSummaries.length; i += batchSize) {
