@@ -114,10 +114,11 @@ export const updateMonthRowForEmployee = async ({
   totalWorkedHoursColumnId,
   totalClientHoursColumnId,
   columnTypes,
-  apiToken
+  apiToken,
+  itemId
 }) => {
-  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken)
-  if (!itemId) return
+  const actualItemId = itemId || await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken)
+  if (!actualItemId) return
 
   const columnValues = {}
 
@@ -165,7 +166,7 @@ export const updateMonthRowForEmployee = async ({
     mutation {
       change_multiple_column_values(
         board_id: ${boardId},
-        item_id: ${itemId},
+        item_id: ${actualItemId},
         column_values: "${columnValuesStr}"
       ) {
         id
@@ -174,7 +175,7 @@ export const updateMonthRowForEmployee = async ({
   `
 
   await callMonday(mutation, apiToken)
-  return itemId
+  return actualItemId
 }
 
 // Replace existing "other clients" subitems for a month row with fresh ones
@@ -197,56 +198,72 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
   const data = await callMonday(query, apiToken)
   const subitems = data?.items?.[0]?.subitems || []
 
-  // Archive existing subitems to avoid duplicates
-  for (const s of subitems) {
-    if (!s?.id) continue
-    const archiveMutation = `
-      mutation {
-        archive_item (item_id: ${s.id}) {
-          id
+  // Archive existing subitems to avoid duplicates in batches
+  const archiveBatchSize = 10;
+  for (let i = 0; i < subitems.length; i += archiveBatchSize) {
+    const batch = subitems.slice(i, i + archiveBatchSize);
+    await Promise.all(batch.map(async (s) => {
+      if (!s?.id) return;
+      const archiveMutation = `
+        mutation {
+          archive_item (item_id: ${s.id}) {
+            id
+          }
         }
+      `
+      try {
+        await callMonday(archiveMutation, apiToken);
+      } catch (err) {
+        console.error(`[CRON] Failed to archive subitem ${s.id}:`, err.message);
       }
-    `
-    await callMonday(archiveMutation, apiToken)
+    }));
   }
 
   // Create new subitems from otherClients (using item_name as client name and setting worked hours column)
-  // And collect the created subitems to return them
   const createdSubitems = [];
-  for (const client of otherClients) {
-    // Prepare column values for subitem creation
-    let columnValuesParam = '';
-    if (subitemWorkedHoursColumnId && (client.hours || client.hours === 0)) {
-      const columnValues = {};
-      columnValues[subitemWorkedHoursColumnId] = String(client.hours);
-      const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"');
-      columnValuesParam = `column_values: "${columnValuesStr}"`;
-    }
-    
-    const createMutation = `
-      mutation {
-        create_subitem (
-          parent_item_id: ${parentItemId},
-          item_name: "${client.clientName || ''}",
-          ${columnValuesParam}
-        ) {
-          id
+  const createBatchSize = 10;
+  for (let i = 0; i < otherClients.length; i += createBatchSize) {
+    const batch = otherClients.slice(i, i + createBatchSize);
+    const batchResults = await Promise.all(batch.map(async (client) => {
+      // Prepare column values for subitem creation
+      let columnValuesParam = '';
+      if (subitemWorkedHoursColumnId && (client.hours || client.hours === 0)) {
+        const columnValues = {};
+        columnValues[subitemWorkedHoursColumnId] = String(client.hours);
+        const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"');
+        columnValuesParam = `column_values: "${columnValuesStr}"`;
+      }
+      
+      const createMutation = `
+        mutation {
+          create_subitem (
+            parent_item_id: ${parentItemId},
+            item_name: "${client.clientName || ''}",
+            ${columnValuesParam}
+          ) {
+            id
+          }
         }
-      }
-    `;
+      `;
 
-    try {
-      const result = await callMonday(createMutation, apiToken);
-      const subitemId = result?.create_subitem?.id;
-      if (subitemId) {
-        createdSubitems.push({
-          id: subitemId,
-          name: client.clientName || ''
-        });
+      try {
+        const result = await callMonday(createMutation, apiToken);
+        const subitemId = result?.create_subitem?.id;
+        if (subitemId) {
+          return {
+            id: subitemId,
+            name: client.clientName || ''
+          };
+        }
+      } catch (error) {
+        console.error(`[CRON] Failed to create subitem for client ${client.clientName}:`, error.message);
       }
-    } catch (error) {
-      console.error(`[CRON] Failed to create subitem for client ${client.clientName}:`, error.message);
-    }
+      return null;
+    }));
+    
+    batchResults.forEach(res => {
+      if (res) createdSubitems.push(res);
+    });
   }
   
   return createdSubitems;
@@ -834,7 +851,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
 }
 
 // Update subitem worked hours column for an employee
-export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSummary, monthKey, apiToken) => {
+export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSummary, monthKey, apiToken, itemId = null) => {
   // Get the employee's group ID from the target config
   // Try to find the group using employeeId first, then employeeName
   let groupId = null;
@@ -890,11 +907,11 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
     return;
   }
   
-  // Get or create the month item for this employee
+  // Get or create the month item for this employee if not provided
   const boardId = targetConfig.targetBoardId;
-  const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
+  const actualItemId = itemId || await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
   
-  if (!itemId) {
+  if (!actualItemId) {
     console.log(`[CRON] Could not get or create month item for ${employeeSummary.employeeName}`);
     return;
   }
@@ -913,7 +930,7 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
   // Sync subitems (create new ones, archive old ones) with worked hours column values set during creation.
   // Note: we reuse the generic syncOtherClientsAsSubitems helper, but we now pass ALL clients.
   const createdSubitems = await syncOtherClientsAsSubitems({ 
-    parentItemId: itemId,
+    parentItemId: actualItemId,
     otherClients: clientsForSubitems,
     subitemWorkedHoursColumnId: targetConfig.subitemWorkedHoursColumnId,
     apiToken
@@ -927,77 +944,82 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
   }
   
   const boardId = targetConfig.targetBoardId;
+  const batchSize = 5;
   
-  // Process each employee summary
-  for (const employeeSummary of employeeSummaries) {
-    try {
-      // Get the employee's group ID from the target config
-      let groupId = null;
-      const employeeGroups = targetConfig.employeeGroups;
-      
-      if (employeeSummary.employeeId) {
-        if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeId)) {
-          groupId = employeeGroups.get(employeeSummary.employeeId);
-        } else if (employeeGroups?.[employeeSummary.employeeId]) {
-          groupId = employeeGroups[employeeSummary.employeeId];
+  // Process employee summaries in batches
+  for (let i = 0; i < employeeSummaries.length; i += batchSize) {
+    const batch = employeeSummaries.slice(i, i + batchSize);
+    
+    await Promise.all(batch.map(async (employeeSummary) => {
+      try {
+        // Get the employee's group ID from the target config
+        let groupId = null;
+        const employeeGroups = targetConfig.employeeGroups;
+        
+        if (employeeSummary.employeeId) {
+          if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeId)) {
+            groupId = employeeGroups.get(employeeSummary.employeeId);
+          } else if (employeeGroups?.[employeeSummary.employeeId]) {
+            groupId = employeeGroups[employeeSummary.employeeId];
+          }
         }
-      }
-      
-      if (!groupId && employeeSummary.employeeName) {
-        if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeName)) {
-          groupId = employeeGroups.get(employeeSummary.employeeName);
-        } else if (employeeGroups?.[employeeSummary.employeeName]) {
-          groupId = employeeGroups[employeeSummary.employeeName];
+        
+        if (!groupId && employeeSummary.employeeName) {
+          if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeName)) {
+            groupId = employeeGroups.get(employeeSummary.employeeName);
+          } else if (employeeGroups?.[employeeSummary.employeeName]) {
+            groupId = employeeGroups[employeeSummary.employeeName];
+          }
         }
-      }
-      
-      if (!groupId) {
-        continue;
-      }
-      
-      // Get or create the month item for this employee
-      const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
-      if (!itemId) {
-        continue;
-      }
-      
-      // Update the main item with employee data
-      const columnTypes = {}; // TODO: Get actual column types if needed
-      
-      // Get the column mapping for this group
-      let clientColumnMap = {};
-      if (targetConfig.groupClientColumns instanceof Map) {
-        clientColumnMap = targetConfig.groupClientColumns.get(groupId) || {};
-      } else {
-        clientColumnMap = targetConfig.groupClientColumns?.[groupId] || {};
-      }
-      
-      await updateMonthRowForEmployee({
-        boardId,
-        groupId,
-        monthKey,
-        employeeSummary,
-        clientColumnMap,
-        totalWorkedHoursColumnId: targetConfig.totalWorkedHoursColumnId,
-        totalClientHoursColumnId: targetConfig.totalClientHoursColumnId,
-        columnTypes,
-        apiToken
-      });
-      
-      // Create subitems for clients if configured.
-      // Prefer allClients (new), but keep support for otherClients for older data.
-      const hasAnyClientsForSubitems =
-        (Array.isArray(employeeSummary.allClients) && employeeSummary.allClients.length > 0) ||
-        (Array.isArray(employeeSummary.otherClients) && employeeSummary.otherClients.length > 0);
+        
+        if (!groupId) {
+          return;
+        }
+        
+        // Get or create the month item for this employee ONCE
+        const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
+        if (!itemId) {
+          return;
+        }
+        
+        // Update the main item with employee data
+        const columnTypes = {}; // TODO: Get actual column types if needed
+        
+        // Get the column mapping for this group
+        let clientColumnMap = {};
+        if (targetConfig.groupClientColumns instanceof Map) {
+          clientColumnMap = targetConfig.groupClientColumns.get(groupId) || {};
+        } else {
+          clientColumnMap = targetConfig.groupClientColumns?.[groupId] || {};
+        }
+        
+        await updateMonthRowForEmployee({
+          boardId,
+          groupId,
+          monthKey,
+          employeeSummary,
+          clientColumnMap,
+          totalWorkedHoursColumnId: targetConfig.totalWorkedHoursColumnId,
+          totalClientHoursColumnId: targetConfig.totalClientHoursColumnId,
+          columnTypes,
+          apiToken,
+          itemId // Pass down the already fetched itemId
+        });
+        
+        // Create subitems for clients if configured.
+        const hasAnyClientsForSubitems =
+          (Array.isArray(employeeSummary.allClients) && employeeSummary.allClients.length > 0) ||
+          (Array.isArray(employeeSummary.otherClients) && employeeSummary.otherClients.length > 0);
 
-      if (targetConfig.subitemWorkedHoursColumnId && hasAnyClientsForSubitems) {
-        await updateEmployeeSubitemWorkedHours(targetConfig, employeeSummary, monthKey, apiToken);
+        if (targetConfig.subitemWorkedHoursColumnId && hasAnyClientsForSubitems) {
+          await updateEmployeeSubitemWorkedHours(targetConfig, employeeSummary, monthKey, apiToken, itemId);
+        }
+        
+        console.log(`[TARGET BOARD] Successfully processed employee ${employeeSummary.employeeName}`);
+      } catch (error) {
+        console.error(`[TARGET BOARD] Error processing employee ${employeeSummary.employeeName}:`, error.message);
       }
-      
-      console.log(`[TARGET BOARD] Successfully processed employee ${employeeSummary.employeeName}`);
-    } catch (error) {
-      console.error(`[TARGET BOARD] Error processing employee ${employeeSummary.employeeName}:`, error.message);
-    }
+    }));
   }
   
   console.log('[TARGET BOARD] Finished processing all employees');
