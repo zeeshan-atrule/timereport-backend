@@ -413,14 +413,14 @@ export const fetchGroupItems = async (boardId, groupIds, requestedColumnIds, pag
 
     const activeGroups = Array.from(cursorMap.entries());
     await Promise.all(activeGroups.map(async ([groupId, cursor]) => {
-      const cursorPart = cursor ? `, cursor: "${cursor}"` : ''
+      const cursorArgs = cursor ? `cursor: "${cursor}"` : `limit: ${pageLimit}`
       const pageQuery = `
         query {
           boards(ids: ${boardId}) {
             groups(ids: ["${groupId}"]) {
               id
               title
-              items_page(limit: ${pageLimit}${cursorPart}) {
+              items_page(${cursorArgs}) {
                 cursor
                 items {
                   id
