@@ -16,14 +16,28 @@ const getAuthHeader = (apiToken) => {
   return { Authorization: apiToken }
 }
 
-const callMonday = async (query, apiToken) => {
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const callMonday = async (query, apiToken, retries = 3) => {
   try {
     const { data } = await mondayClient.post('', { query }, { headers: getAuthHeader(apiToken) })
     if (data?.errors?.length) {
       const msg = data.errors[0]?.message || 'Monday.com API error'
       const locations = data.errors[0]?.locations?.map((l) => `${l.line}:${l.column}`).join(', ')
-      console.error(`[MONDAY ERROR] ${msg}${locations ? ` (${locations})` : ''}`);
-      throw new Error(`${msg}${locations ? ` (${locations})` : ''}`)
+      const errorMsg = `${msg}${locations ? ` (${locations})` : ''}`;
+      
+      // Retry on complexity or rate limit errors
+      if (msg.toLowerCase().includes('complexity') || msg.toLowerCase().includes('rate') || msg.toLowerCase().includes('limit')) {
+         if (retries > 0) {
+             const delay = (4 - retries) * 2000;
+             console.warn(`[MONDAY WARN] Complexity/Rate limit hit (${msg}). Retrying in ${delay}ms...`);
+             await sleep(delay);
+             return callMonday(query, apiToken, retries - 1);
+         }
+      }
+      
+      console.error(`[MONDAY ERROR] ${errorMsg}`);
+      throw new Error(errorMsg)
     }
     if (!data?.data) {
       console.error(`[MONDAY ERROR] Empty response from Monday.com API`);
@@ -31,6 +45,15 @@ const callMonday = async (query, apiToken) => {
     }
     return data.data
   } catch (error) {
+    if (retries > 0) {
+      // Axios error (e.g. 429 or 500) or network issue
+      if (error.response?.status === 429 || error.response?.status >= 500 || error.code === 'ECONNABORTED' || !error.response) {
+        const delay = (4 - retries) * 2000;
+        console.warn(`[MONDAY WARN] Network/Rate error (${error.message}). Retrying in ${delay}ms...`);
+        await sleep(delay);
+        return callMonday(query, apiToken, retries - 1);
+      }
+    }
     console.error(`[MONDAY ERROR] Network error:`, error.message);
     throw error;
   }
@@ -199,7 +222,7 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
   const subitems = data?.items?.[0]?.subitems || []
 
   // Archive existing subitems to avoid duplicates in batches
-  const archiveBatchSize = 10;
+  const archiveBatchSize = 3;
   for (let i = 0; i < subitems.length; i += archiveBatchSize) {
     const batch = subitems.slice(i, i + archiveBatchSize);
     await Promise.all(batch.map(async (s) => {
@@ -221,7 +244,7 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
 
   // Create new subitems from otherClients (using item_name as client name and setting worked hours column)
   const createdSubitems = [];
-  const createBatchSize = 10;
+  const createBatchSize = 3;
   for (let i = 0; i < otherClients.length; i += createBatchSize) {
     const batch = otherClients.slice(i, i + createBatchSize);
     const batchResults = await Promise.all(batch.map(async (client) => {
@@ -945,7 +968,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
   }
   
   const boardId = targetConfig.targetBoardId;
-  const batchSize = 15;
+  const batchSize = 5;
   
   // Process employee summaries in batches
   for (let i = 0; i < employeeSummaries.length; i += batchSize) {
