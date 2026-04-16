@@ -8,7 +8,8 @@ import dotenv from 'dotenv'
 import configRoutes from './routes/config.js'
 import syncRoutes from './routes/sync.js'
 import targetConfigRoutes from './routes/targetConfig.js'
-import monthlyReportHandler from './routes/monthly-report.js' // Import the monthly report handler
+import monthlyReportHandler from './routes/monthly-report.js'
+import updateGroupConfigHandler from './routes/update-group-config.js'
 import AuditlogRoutes from './routes/audit-logs.js'
 dotenv.config()
 
@@ -33,7 +34,8 @@ app.get('/health', (_req, res) => {
 app.use('/api/config', configRoutes)
 app.use('/api/sync', syncRoutes)
 app.use('/api/target-config', targetConfigRoutes)
-app.get('/api/cron/monthly-report', monthlyReportHandler) // Register the cron job route
+app.get('/api/cron/monthly-report', monthlyReportHandler)
+app.get('/api/cron/update-group-config', updateGroupConfigHandler) // Standalone group config rolling update
 app.use('/api', AuditlogRoutes)
 app.use((err, _req, res, _next) => {
   console.error(err)
