@@ -1,15 +1,23 @@
 import crypto from 'crypto'
 import dotenv from 'dotenv'
 dotenv.config()
+
 const algorithm = 'aes-256-cbc'
-const secretKey = crypto
-  .createHash('sha256')
-  .update(process.env.TOKEN_SECRET_KEY)
-  .digest('base64')
-  .substring(0, 32)
+
+const getSecretKey = () => {
+  if (!process.env.TOKEN_SECRET_KEY) {
+    throw new Error('TOKEN_SECRET_KEY environment variable is not set')
+  }
+  return crypto
+    .createHash('sha256')
+    .update(process.env.TOKEN_SECRET_KEY)
+    .digest('base64')
+    .substring(0, 32)
+}
 
 // Encrypt
 export const encrypt = (text) => {
+  const secretKey = getSecretKey()
   const iv = crypto.randomBytes(16)
   const cipher = crypto.createCipheriv(algorithm, secretKey, iv)
 
@@ -21,6 +29,7 @@ export const encrypt = (text) => {
 
 // Decrypt
 export const decrypt = (encryptedText) => {
+  const secretKey = getSecretKey()
   const [ivHex, encrypted] = encryptedText.split(':')
   const iv = Buffer.from(ivHex, 'hex')
 

@@ -23,27 +23,26 @@ app.use(cors({ origin: allowOrigins.length ? allowOrigins : '*' }))
 app.use(express.json({ limit: '1mb' }))
 app.use(morgan('dev'))
 
-// ── Lazy MongoDB connection (cached across warm invocations on Vercel) ──────
-let isDbConnected = false;
+// ── Lazy MongoDB connection (cached across warm invocations) ─────────────────
+let isDbConnected = false
 
 const connectDb = async () => {
-  if (isDbConnected && mongoose.connection.readyState === 1) return;
-  if (!process.env.MONGO_URI) throw new Error('MONGO_URI is not set');
-  await mongoose.connect(process.env.MONGO_URI);
-  isDbConnected = true;
-  console.log('[DB] Connected to MongoDB');
-};
+  if (isDbConnected && mongoose.connection.readyState === 1) return
+  if (!process.env.MONGO_URI) throw new Error('MONGO_URI is not set')
+  await mongoose.connect(process.env.MONGO_URI)
+  isDbConnected = true
+  console.log('[DB] Connected to MongoDB')
+}
 
-// Ensure DB is connected before every request
 app.use(async (_req, _res, next) => {
   try {
-    await connectDb();
-    next();
+    await connectDb()
+    next()
   } catch (err) {
-    next(err);
+    next(err)
   }
-});
-// ────────────────────────────────────────────────────────────────────────────
+})
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' })
@@ -61,12 +60,12 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ message: err.message || 'Internal server error' })
 })
 
-// ── Local dev only: start HTTP server (Vercel handles this in production) ───
+// ── Local dev: start HTTP server (Vercel handles this in production) ──────────
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 4000
   app.listen(PORT, () => console.log(`Backend listening on ${PORT}`))
 }
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Export for Vercel serverless
-export default app;
+// Required for Vercel — export the Express app as the serverless handler
+export default app
