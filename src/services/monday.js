@@ -25,17 +25,17 @@ const callMonday = async (query, apiToken, retries = 3) => {
       const msg = data.errors[0]?.message || 'Monday.com API error'
       const locations = data.errors[0]?.locations?.map((l) => `${l.line}:${l.column}`).join(', ')
       const errorMsg = `${msg}${locations ? ` (${locations})` : ''}`;
-      
+
       // Retry on complexity or rate limit errors
       if (msg.toLowerCase().includes('complexity') || msg.toLowerCase().includes('rate') || msg.toLowerCase().includes('limit')) {
-         if (retries > 0) {
-             const delay = (4 - retries) * 2000;
-             console.warn(`[MONDAY WARN] Complexity/Rate limit hit (${msg}). Retrying in ${delay}ms...`);
-             await sleep(delay);
-             return callMonday(query, apiToken, retries - 1);
-         }
+        if (retries > 0) {
+          const delay = (4 - retries) * 2000;
+          console.warn(`[MONDAY WARN] Complexity/Rate limit hit (${msg}). Retrying in ${delay}ms...`);
+          await sleep(delay);
+          return callMonday(query, apiToken, retries - 1);
+        }
       }
-      
+
       console.error(`[MONDAY ERROR] ${errorMsg}`);
       throw new Error(errorMsg)
     }
@@ -213,18 +213,31 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
         id
         subitems {
           id
+          name
+          board {
+            id
+          }
         }
       }
     }
   `
 
   const data = await callMonday(query, apiToken)
-  const subitems = data?.items?.[0]?.subitems || []
+  const existingSubitems = data?.items?.[0]?.subitems || []
 
-  // Archive existing subitems to avoid duplicates in batches
+  // Create a map of existing subitems by lowercased name for matching
+  const existingSubitemsMap = new Map();
+  existingSubitems.forEach(s => {
+    if (s.name) existingSubitemsMap.set(s.name.toLowerCase(), s);
+  });
+
+  const activeClientNames = new Set(otherClients.map(c => (c.clientName || '').toLowerCase()));
+  const subitemsToArchive = existingSubitems.filter(s => s.name && !activeClientNames.has(s.name.toLowerCase()));
+
+  // Archive subitems that are no longer in the list
   const archiveBatchSize = 3;
-  for (let i = 0; i < subitems.length; i += archiveBatchSize) {
-    const batch = subitems.slice(i, i + archiveBatchSize);
+  for (let i = 0; i < subitemsToArchive.length; i += archiveBatchSize) {
+    const batch = subitemsToArchive.slice(i, i + archiveBatchSize);
     await Promise.all(batch.map(async (s) => {
       if (!s?.id) return;
       const archiveMutation = `
@@ -242,53 +255,90 @@ export const syncOtherClientsAsSubitems = async ({ parentItemId, otherClients, s
     }));
   }
 
-  // Create new subitems from otherClients (using item_name as client name and setting worked hours column)
+  // Update existing subitems and create new ones
   const createdSubitems = [];
-  const createBatchSize = 3;
-  for (let i = 0; i < otherClients.length; i += createBatchSize) {
-    const batch = otherClients.slice(i, i + createBatchSize);
+  const processBatchSize = 3;
+  for (let i = 0; i < otherClients.length; i += processBatchSize) {
+    const batch = otherClients.slice(i, i + processBatchSize);
     const batchResults = await Promise.all(batch.map(async (client) => {
-      // Prepare column values for subitem creation
-      let columnValuesParam = '';
-      if (subitemWorkedHoursColumnId && (client.hours || client.hours === 0)) {
-        const columnValues = {};
-        columnValues[subitemWorkedHoursColumnId] = String(client.hours);
-        const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"');
-        columnValuesParam = `column_values: "${columnValuesStr}"`;
-      }
-      
-      const createMutation = `
-        mutation {
-          create_subitem (
-            parent_item_id: ${parentItemId},
-            item_name: "${client.clientName || ''}",
-            ${columnValuesParam}
-          ) {
-            id
+      const clientName = (client.clientName || '');
+      if (!clientName) return null;
+
+      const existingSubitem = existingSubitemsMap.get(clientName.toLowerCase());
+
+      if (existingSubitem) {
+        // Update existing subitem
+        if (subitemWorkedHoursColumnId && existingSubitem.board?.id && (client.hours || client.hours === 0)) {
+          const columnValues = {};
+          columnValues[subitemWorkedHoursColumnId] = String(client.hours);
+          const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"');
+
+          const updateMutation = `
+            mutation {
+              change_multiple_column_values(
+                board_id: ${existingSubitem.board.id},
+                item_id: ${existingSubitem.id},
+                column_values: "${columnValuesStr}"
+              ) {
+                id
+              }
+            }
+          `;
+
+          try {
+            await callMonday(updateMutation, apiToken);
+            return {
+              id: existingSubitem.id,
+              name: clientName
+            };
+          } catch (error) {
+            console.error(`[CRON] Failed to update subitem for client ${clientName}:`, error.message);
           }
         }
-      `;
-
-      try {
-        const result = await callMonday(createMutation, apiToken);
-        const subitemId = result?.create_subitem?.id;
-        if (subitemId) {
-          return {
-            id: subitemId,
-            name: client.clientName || ''
-          };
+        return null; // Return null so it doesn't get added to createdSubitems (or it could, depending on return semantics)
+      } else {
+        // Create new subitem
+        let columnValuesParam = '';
+        if (subitemWorkedHoursColumnId && (client.hours || client.hours === 0)) {
+          const columnValues = {};
+          columnValues[subitemWorkedHoursColumnId] = String(client.hours);
+          const columnValuesStr = JSON.stringify(columnValues).replace(/"/g, '\\"');
+          columnValuesParam = `column_values: "${columnValuesStr}"`;
         }
-      } catch (error) {
-        console.error(`[CRON] Failed to create subitem for client ${client.clientName}:`, error.message);
+
+        const createMutation = `
+          mutation {
+            create_subitem (
+              parent_item_id: ${parentItemId},
+              item_name: "${clientName}",
+              ${columnValuesParam}
+            ) {
+              id
+            }
+          }
+        `;
+
+        try {
+          const result = await callMonday(createMutation, apiToken);
+          const subitemId = result?.create_subitem?.id;
+          if (subitemId) {
+            return {
+              id: subitemId,
+              name: clientName
+            };
+          }
+        } catch (error) {
+          console.error(`[CRON] Failed to create subitem for client ${clientName}:`, error.message);
+        }
+        return null;
       }
-      return null;
     }));
-    
+
     batchResults.forEach(res => {
       if (res) createdSubitems.push(res);
     });
   }
-  
+
   return createdSubitems;
 }
 
@@ -310,7 +360,7 @@ export const fetchBoardColumnsAndGroups = async (boardId, apiToken) => {
   `
   try {
     const data = await callMonday(query, apiToken)
-    
+
     if (!data?.boards || data.boards.length === 0) {
       console.error(`[MONDAY ERROR] No boards found for boardId=${boardId}. This might indicate a permissions issue or invalid board ID.`);
       return {
@@ -318,7 +368,7 @@ export const fetchBoardColumnsAndGroups = async (boardId, apiToken) => {
         groups: []
       }
     }
-    
+
     const board = data.boards[0]
     if (!board) {
       console.error(`[MONDAY ERROR] Board data is null for boardId=${boardId}`);
@@ -327,7 +377,7 @@ export const fetchBoardColumnsAndGroups = async (boardId, apiToken) => {
         groups: []
       }
     }
-    
+
     return {
       columns: board.columns || [],
       groups: board.groups || []
@@ -472,23 +522,23 @@ const parseIsoToDateString = (iso) => {
 const splitNames = (text) =>
   text
     ? text
-        .split(',')
-        .map((n) => n.trim())
-        .filter(Boolean)
+      .split(',')
+      .map((n) => n.trim())
+      .filter(Boolean)
     : []
 
 export const buildTasksFromItems = (items, columns, dateRange) => {
   const { employee, client, timeTracking1, timeTracking2 } = columns
-  
+
   // Convert date range to milliseconds for easier comparison
   let rangeStartMs = null
   let rangeEndMs = null
-  
+
   if (dateRange?.start) {
     const startDate = new Date(`${dateRange.start}T00:00:00Z`)
     rangeStartMs = startDate.getTime()
   }
-  
+
   if (dateRange?.end) {
     const endDate = new Date(`${dateRange.end}T23:59:59.999Z`)
     rangeEndMs = endDate.getTime()
@@ -504,7 +554,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       itemIdSet.add(item.id);
     }
   });
-  
+
   // Remove duplicate items, keeping only the first occurrence
   const uniqueItems = [];
   const seenItemIds = new Set();
@@ -514,7 +564,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       seenItemIds.add(item.id);
     }
   });
-  
+
   const tasks = []
   const tempNameToId = new Map()
   const tempIdToName = new Map()
@@ -593,14 +643,14 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       if (!timeCol?.history || !Array.isArray(timeCol.history)) {
         return
       }
-      
+
       // Track processed entries to avoid duplicates
       const processedEntries = new Set()
-      
+
       timeCol.history.forEach((entry, index) => {
         // Create a unique key for this entry to avoid duplicates
         const entryKey = `${entry.started_at}_${entry.ended_at}_${entry.started_user_id}_${entry.ended_user_id}`
-        
+
         if (processedEntries.has(entryKey)) {
           return
         }
@@ -633,19 +683,19 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
             if (endTime < rangeStartMs || startTime > rangeEndMs) {
               return
             }
-            
+
             // Calculate overlapping portion
             const clampedStart = Math.max(startTime, rangeStartMs)
             const clampedEnd = Math.min(endTime, rangeEndMs)
-            
+
             // Ensure valid overlap
             if (clampedEnd <= clampedStart) {
               return
             }
-            
+
             const durationMs = clampedEnd - clampedStart
             const durationMinutes = Math.floor(durationMs / (1000 * 60))
-            
+
             if (durationMinutes > 0) {
               const currentTime = employeeTimeMap.get(userId) || 0
               employeeTimeMap.set(userId, currentTime + durationMinutes)
@@ -657,7 +707,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
             // No date range filter, count full duration
             const durationMs = endTime - startTime
             const durationMinutes = Math.floor(durationMs / (1000 * 60))
-            
+
             if (durationMinutes > 0) {
               const currentTime = employeeTimeMap.get(userId) || 0
               employeeTimeMap.set(userId, currentTime + durationMinutes)
@@ -674,12 +724,12 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
 
     const timeCol1 = columnsValues.find((col) => col.id === timeTracking1)
     const timeCol2 = columnsValues.find((col) => col.id === timeTracking2)
-    
+
     if (timeCol1) processTimeHistory(timeCol1, 'timeTracking1')
     if (timeCol2) processTimeHistory(timeCol2, 'timeTracking2')
 
     const allEmployeeEntries = new Map()
-    
+
     // First, populate from employee names in the employee column
     employeeNames.forEach((name, index) => {
       const empId = employeeIds[index] || tempNameToId.get(name) || ''
@@ -695,11 +745,11 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
     employeeTimeMap.forEach((_time, empId) => {
       // Only add if this employee isn't already in our list
       const empIdStr = String(empId)
-      
+
       // Check if employee with this ID already exists
       // We need to check if any existing employee has this ID (and the ID is not empty)
       const alreadyExists = Array.from(allEmployeeEntries.values()).some(emp => emp.id === empIdStr && emp.id !== '');
-      
+
       if (!alreadyExists && tempIdToName.has(empIdStr)) {
         const empName = tempIdToName.get(empIdStr);
         // Use employee ID as the key
@@ -718,7 +768,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
         }
         const effectiveDate = taskDate || dateRange?.start || ''
         const effectiveMonth = monthKey || (dateRange ? dateRange.start.substring(0, 7) : '')
-        
+
         tasks.push({
           id: item.id,
           task: item.name || '',
@@ -732,7 +782,7 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
       })
     }
   })
-  
+
   return tasks
 }
 
@@ -755,9 +805,9 @@ export const buildTasksFromItems = (items, columns, dateRange) => {
 export const aggregateTasksByEmployeeClientMonth = (tasks) => {
   // Internal map: employeeId or name -> aggregation buckets
   const employeeMap = new Map();
-  
+
   // Debug: Log number of tasks being processed
-  
+
   tasks.forEach((task, index) => {
     // Debug: Log each task being processed
     console.log(`[AGGREGATION DEBUG] Processing task ${index}:`, {
@@ -767,7 +817,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
       timeMinutes: task.timeMinutes,
       month: task.month
     });
-    
+
     const empKey = task.employeeId || task.employee;
     if (!employeeMap.has(empKey)) {
       employeeMap.set(empKey, {
@@ -804,14 +854,14 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
 
     // Add to totalWorkedHours once per task (includes ALL time tracked)
     empObj.totalWorkedHours += task.timeMinutes || 0;
-    
+
     // Only add to totalClientHours for "other" clients
     // Prevent double counting by ensuring we only count once
     if (type === 'other') {
       empObj.totalClientHours += task.timeMinutes || 0;
     }
   });
-  
+
   // Merge duplicate clients (same name/month) in each array and sum minutes
   const mergeClients = (clients) => {
     const map = new Map();
@@ -820,14 +870,14 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
       if (!map.has(key)) {
         map.set(key, { ...c });
       } else {
-          map.get(key).minutes += c.minutes;
+        map.get(key).minutes += c.minutes;
       }
     });
-      // Convert minutes to hours (rounded to 2 decimals)
-      return Array.from(map.values()).map(c => ({
-        ...c,
-        hours: Math.round((c.minutes / 60) * 100) / 100 
-      }));
+    // Convert minutes to hours (rounded to 2 decimals)
+    return Array.from(map.values()).map(c => ({
+      ...c,
+      hours: Math.round((c.minutes / 60) * 100) / 100
+    }));
   };
 
   const aggregatedResults = Array.from(employeeMap.values()).map(emp => {
@@ -870,7 +920,7 @@ export const aggregateTasksByEmployeeClientMonth = (tasks) => {
 
     return result;
   });
-  
+
   return aggregatedResults;
 }
 
@@ -879,21 +929,21 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
   // Get the employee's group ID from the target config
   // Try to find the group using employeeId first, then employeeName
   let groupId = null;
-  
+
   // Handle both Map and plain object structures
   const employeeGroups = targetConfig.employeeGroups;
-  
+
   if (employeeSummary.employeeId) {
     // Try Map.get() first
     if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeId)) {
       groupId = employeeGroups.get(employeeSummary.employeeId);
-    } 
+    }
     // Try plain object access
     else if (employeeGroups?.[employeeSummary.employeeId]) {
       groupId = employeeGroups[employeeSummary.employeeId];
     }
   }
-  
+
   if (!groupId && employeeSummary.employeeName) {
     // Try Map.get() for employeeName
     if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeName)) {
@@ -904,7 +954,7 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
       groupId = employeeGroups[employeeSummary.employeeName];
     }
   }
-  
+
   // Try to find any key that matches
   if (!groupId) {
     // For Map
@@ -926,34 +976,34 @@ export const updateEmployeeSubitemWorkedHours = async (targetConfig, employeeSum
       }
     }
   }
-  
+
   if (!groupId) {
     return;
   }
-  
+
   // Get or create the month item for this employee if not provided
   const boardId = targetConfig.targetBoardId;
   const actualItemId = itemId || await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
-  
+
   if (!actualItemId) {
     console.log(`[CRON] Could not get or create month item for ${employeeSummary.employeeName}`);
     return;
   }
-  
+
   // For each client, create subitems.
   // Prefer the new allClients array; fall back to otherClients for backwards compatibility.
   const clientsForSubitems = employeeSummary.allClients || employeeSummary.otherClients || [];
-  
+
   console.log(`[CRON DEBUG] Processing ${clientsForSubitems.length} clients for subitems for ${employeeSummary.employeeName}`);
-  
+
   if (clientsForSubitems.length === 0) {
     console.log(`[CRON] No clients to process for subitems for ${employeeSummary.employeeName}`);
     return;
   }
-  
+
   // Sync subitems (create new ones, archive old ones) with worked hours column values set during creation.
   // Note: we reuse the generic syncOtherClientsAsSubitems helper, but we now pass ALL clients.
-  const createdSubitems = await syncOtherClientsAsSubitems({ 
+  const createdSubitems = await syncOtherClientsAsSubitems({
     parentItemId: actualItemId,
     otherClients: clientsForSubitems,
     subitemWorkedHoursColumnId: targetConfig.subitemWorkedHoursColumnId,
@@ -966,20 +1016,20 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
   if (!targetConfig || !employeeSummaries || !Array.isArray(employeeSummaries)) {
     return;
   }
-  
+
   const boardId = targetConfig.targetBoardId;
   const batchSize = 5;
-  
+
   // Process employee summaries in batches
   for (let i = 0; i < employeeSummaries.length; i += batchSize) {
     const batch = employeeSummaries.slice(i, i + batchSize);
-    
+
     await Promise.all(batch.map(async (employeeSummary) => {
       try {
         // Get the employee's group ID from the target config
         let groupId = null;
         const employeeGroups = targetConfig.employeeGroups;
-        
+
         if (employeeSummary.employeeId) {
           if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeId)) {
             groupId = employeeGroups.get(employeeSummary.employeeId);
@@ -987,7 +1037,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
             groupId = employeeGroups[employeeSummary.employeeId];
           }
         }
-        
+
         if (!groupId && employeeSummary.employeeName) {
           if (employeeGroups instanceof Map && employeeGroups.get(employeeSummary.employeeName)) {
             groupId = employeeGroups.get(employeeSummary.employeeName);
@@ -995,20 +1045,20 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
             groupId = employeeGroups[employeeSummary.employeeName];
           }
         }
-        
+
         if (!groupId) {
           return;
         }
-        
+
         // Get or create the month item for this employee ONCE
         const itemId = await getOrCreateMonthItem(boardId, groupId, monthKey, apiToken);
         if (!itemId) {
           return;
         }
-        
+
         // Update the main item with employee data
         const columnTypes = {}; // TODO: Get actual column types if needed
-        
+
         // Get the column mapping for this group
         let clientColumnMap = {};
         if (targetConfig.groupClientColumns instanceof Map) {
@@ -1016,7 +1066,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
         } else {
           clientColumnMap = targetConfig.groupClientColumns?.[groupId] || {};
         }
-        
+
         await updateMonthRowForEmployee({
           boardId,
           groupId,
@@ -1029,7 +1079,7 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
           apiToken,
           itemId // Pass down the already fetched itemId
         });
-        
+
         // Create subitems for clients if configured.
         const hasAnyClientsForSubitems =
           (Array.isArray(employeeSummary.allClients) && employeeSummary.allClients.length > 0) ||
@@ -1038,13 +1088,13 @@ export const createTargetBoardItems = async (targetConfig, employeeSummaries, mo
         if (targetConfig.subitemWorkedHoursColumnId && hasAnyClientsForSubitems) {
           await updateEmployeeSubitemWorkedHours(targetConfig, employeeSummary, monthKey, apiToken, itemId);
         }
-        
+
         console.log(`[TARGET BOARD] Successfully processed employee ${employeeSummary.employeeName}`);
       } catch (error) {
         console.error(`[TARGET BOARD] Error processing employee ${employeeSummary.employeeName}:`, error.message);
       }
     }));
   }
-  
+
   console.log('[TARGET BOARD] Finished processing all employees');
 }

@@ -69,13 +69,13 @@ const updateAllMonthsGroupConfig = async (config, apiToken) => {
     const year = now.getUTCFullYear();
     const monthIndex = now.getUTCMonth(); // 0-based
 
-    const currentMonthKey  = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+    const currentMonthKey = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
     const currentMonthName = `${MONTH_NAMES[monthIndex]} ${year}`;
 
-    const prevDate      = new Date(Date.UTC(year, monthIndex - 1, 1));
-    const prevYear      = prevDate.getUTCFullYear();
-    const prevMonthIdx  = prevDate.getUTCMonth();
-    const prevMonthKey  = `${prevYear}-${String(prevMonthIdx + 1).padStart(2, '0')}`;
+    const prevDate = new Date(Date.UTC(year, monthIndex - 1, 1));
+    const prevYear = prevDate.getUTCFullYear();
+    const prevMonthIdx = prevDate.getUTCMonth();
+    const prevMonthKey = `${prevYear}-${String(prevMonthIdx + 1).padStart(2, '0')}`;
     const prevMonthName = `${MONTH_NAMES[prevMonthIdx]} ${prevYear}`;
 
     const currentGroups = getConfigGroups(config, currentMonthKey);
@@ -129,7 +129,7 @@ const updateAllMonthsGroupConfig = async (config, apiToken) => {
 
     // ── Step 3: Set previous month → keep ONLY its month-named group ──
     const prevMonthBoardGroup = groups.find(g => g.title === prevMonthName);
-    const prevMonthNamedId    = prevMonthBoardGroup?.id || prevMonthNamedIds[0] || null;
+    const prevMonthNamedId = prevMonthBoardGroup?.id || prevMonthNamedIds[0] || null;
 
     if (prevMonthNamedId) {
       setConfigGroups(config, prevMonthKey, [prevMonthNamedId]);
